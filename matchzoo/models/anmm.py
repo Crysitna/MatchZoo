@@ -28,7 +28,6 @@ class ANMM(BaseModel):
         params.add(Param(
             name='dropout_rate', value=0.1,
             desc="The dropout rate.",
-            hyper_space=hyper_spaces.quniform(0, 1, 0.05)
         ))
         params.add(Param(
             name='num_layers', value=2,
@@ -40,6 +39,7 @@ class ANMM(BaseModel):
             desc="Number of hidden size for each hidden"
                  " layer"
         ))
+        params['input_shapes'] = [(5,), (5, 30,)]
         return params
 
     def build(self):
@@ -75,5 +75,5 @@ class ANMM(BaseModel):
         d_bin = keras.layers.Reshape((q_text_len,))(d_bin)
         q_attention = keras.layers.Reshape((q_text_len,))(q_attention)
         score = keras.layers.Dot(axes=[1, 1])([d_bin, q_attention])
-        x_out = self._make_output_layer()(score)
-        self._backend = keras.Model(inputs=[query, doc], outputs=x_out)
+        out = self._make_output_layer()(score)
+        self._backend = keras.Model(inputs=[query, doc], outputs=out)
