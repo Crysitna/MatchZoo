@@ -12,6 +12,7 @@ from .drmmtks import DRMMTKS
 from .drmm import DRMM
 from .anmm import ANMM
 from .mvlstm import MVLSTM
+from .esim import ESIM 
 
 import matchzoo
 def list_available():
