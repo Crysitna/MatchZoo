@@ -150,6 +150,7 @@ class PWIM(BaseModel):
             add_cou = self._calc_cou_distance(h1_add, h2_add)
             masks = K.ones_like(bi_cou[:, :1, :, :])    # (B, 1, T1, T2)
 
+            # return K.concatenate([bi_cou, for_cou, back_cou, add_cou, masks], axis=1) => the dimension for add_cos and add_l2 needs to be changed accordingly
             return K.concatenate([masks, bi_cou, for_cou, back_cou, add_cou], axis=1)
 
         def _get_output_shape(hs_shape):
@@ -175,12 +176,12 @@ class PWIM(BaseModel):
             """
             Generate focus mask according to the passed in similarity tensor
 
-            :param sim_tensor: tf.Tensor with shape (B, T1, T2)
+            :param sim_tensor: tf.Tensor with shape (T1, T2)
                 either cos similarity or l2 similarity based on h1_add and h2_add
-            :param mask: tf.Tensor with shape (B, T1, T2)
+            :param mask: tf.Tensor with shape (T1, T2)
                 the computation would based on the passed in mask. That is the 
                 entries already set to be 1 in the mask would be skipped) 
-            :return: tf.Tensor with shape (B, T1, T2), with focus emtries set to
+            :return: tf.Tensor with shape (T1, T2), with focus emtries set to
                 be 1 and others set to be 0.1
             """
             s1tag = K.zeros_like(sim_tensor[:, 0])   # (T1)
