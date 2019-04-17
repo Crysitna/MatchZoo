@@ -109,7 +109,6 @@ class PWIM(BaseModel):
         """
         tensor1 = K.l2_normalize(tensor1, axis=-1)
         tensor2 = K.l2_normalize(tensor2, axis=-1)
-        print("inside cos: ", tensor1.shape, tensor2.shape, self._calc_dot_prod(tensor1, tensor2).shape)
         return self._calc_dot_prod(tensor1, tensor2)
 
     def _calc_cou_distance(self,
@@ -122,9 +121,8 @@ class PWIM(BaseModel):
         :param tensor2: tf.Tensor, shape (B, T2, H)
         :return: tf.Tensor, shape (B, 3, T1, T2)
         """
-        print("cos: ", self._calc_cos_distance(tensor1, tensor2).shape)
         return K.stack([self._calc_cos_distance(tensor1, tensor2),
-                        self._calc_l2_distance(tensor1, tensor2),
+                        0 - self._calc_l2_distance(tensor1, tensor2),
                         self._calc_dot_prod(tensor1, tensor2)], axis=1)
 
     def _make_sim_cube_layer(self) -> keras.layers.Layer:
@@ -138,38 +136,32 @@ class PWIM(BaseModel):
         :return: keras.layers.Layer
         """
         def _get_sim_cube(hs):
-            print("called")
             # prepare hidden layers
-            h1for, h1back, h2for, h2back = hs        # (B, T1, H), (B, T2, H)
-            h1bi = K.concatenate([h1for, h1back])    # (B, T1, H * 2)
-            h2bi = K.concatenate([h2for, h2back])    # (B, T2, H * 2)
-            h1add = h1for + h1back  # (B, T1, H)
-            h2add = h2for + h2back  # (B, T2, H)
+            h1_for, h1_back, h2_for, h2_back = hs        # (B, T1, H), (B, T2, H)
+            h1_bi = K.concatenate([h1_for, h1_back])    # (B, T1, H * 2)
+            h2_bi = K.concatenate([h2_for, h2_back])    # (B, T2, H * 2)
+            h1_add = h1_for + h1_back  # (B, T1, H)
+            h2_add = h2_for + h2_back  # (B, T2, H)
 
             # calculate similarities, all *_cou has shape: (B, 3, T1, T2)
-            bi_cou = self._calc_cou_distance(h1bi, h2bi)
-            for_cou = self._calc_cou_distance(h1for, h2for)
-            back_cou = self._calc_cou_distance(h1back, h2back)
-            add_cou = self._calc_cou_distance(h1add, h2add)
+            bi_cou = self._calc_cou_distance(h1_bi, h2_bi)
+            for_cou = self._calc_cou_distance(h1_for, h2_for)
+            back_cou = self._calc_cou_distance(h1_back, h2_back)
+            add_cou = self._calc_cou_distance(h1_add, h2_add)
             masks = K.ones_like(bi_cou[:, :1, :, :])    # (B, 1, T1, T2)
 
-            print("bi_cou: ", bi_cou)
-            print("for_cou: ", for_cou)
-            print("back_cou: ", back_cou)
-            print("add_cou: ", add_cou)
-            print("masks: ", masks)
             return K.concatenate([masks, bi_cou, for_cou, back_cou, add_cou], axis=1)
 
         def _get_output_shape(hs_shape):
             h1for_shape, h1back_shape, h2for_shape, h2back_shape = hs_shape
-            print(h1for_shape, h2for_shape)
             assert h1for_shape == h1back_shape
             assert h2for_shape == h2back_shape
 
             return (h1for_shape[0], 13, h1for_shape[1], h2for_shape[1]) # (13, T1, T2)
 
         return keras.layers.Lambda(function=_get_sim_cube, 
-                                   output_shape=_get_output_shape)
+                                   output_shape=_get_output_shape,
+                                   name='pairwise_word_interaction')
 
     def _make_focus_cube_layer(self) -> keras.layers.Layer:
         """
@@ -184,7 +176,7 @@ class PWIM(BaseModel):
             Generate focus mask according to the passed in similarity tensor
 
             :param sim_tensor: tf.Tensor with shape (B, T1, T2)
-                either cos similarity or l2 similarity based on h1add and h2add
+                either cos similarity or l2 similarity based on h1_add and h2_add
             :param mask: tf.Tensor with shape (B, T1, T2)
                 the computation would based on the passed in mask. That is the 
                 entries already set to be 1 in the mask would be skipped) 
@@ -194,17 +186,17 @@ class PWIM(BaseModel):
             s1tag = K.zeros_like(sim_tensor[:, 0])   # (T1)
             s2tag = K.zeros_like(sim_tensor[0, :])   # (T2)
             t1, t2 = K.int_shape(sim_tensor)
-            print("+++++++++++ t1, t2", t1, t2)
 
-            masks = 0.1 * K.ones_like(sim_tensor)    # (T1, T2), intialize masks
-            sim_tensor = K.flatten(sim_tensor)    # (T1*T2)
+            t1 = 20
+            t2 = 40
+            masks = 0.1 * K.ones_like(sim_tensor)   # (T1, T2), intialize masks
+            sim_tensor = K.flatten(sim_tensor)      # (T1*T2)
             _, idxs = tf.nn.top_k(sim_tensor, k=K.shape(sim_tensor)[-1], sorted=True) # (T1*T2)
 
             for t_idx in range(t1*t2):
                 pos1 = idxs[t_idx] // t1    # index for word in sentence 1
                 pos2 = idxs[t_idx] % t1     # index for word in sentence 2
-                if ((s1tag[pos1] + s2tag[pos2] == 0) and 
-                    (masks[pos1][pos2] == 0.1)):
+                if (s1tag[pos1] + s2tag[pos2] == 0):
                     s1tag[pos1] = 1
                     s2tag[pos2] = 1
                     masks[pos1][pos2] = 1
@@ -218,19 +210,12 @@ class PWIM(BaseModel):
             :param sim_cube: tf.Tensor with shape (B, 13, T1, T2)
             :return: tf.Tensor with shape (B, 13, T1, T2), sim_cube * mask
             """
-            # masks = 0.1 * K.ones_like(sim_cube[0, :, :])    # (B, T1, T2), intialize masks
-            print("++++++++++sim_cube:", sim_cube.shape, K.int_shape(sim_cube))
+            cos_sim_tensor = sim_cube[:, 10, :, :]  # cos_similarity<h1_add, h2_add>
+            cos_masks = tf.map_fn(_get_focus_mask, cos_sim_tensor) # (B, T1, T2)
+            l2_sim_tensor = sim_cube[:, 11, :, :]   # l2_similarity<h1_add, h2_add>
+            l2_masks = tf.map_fn(_get_focus_mask, l2_sim_tensor) # (B, T1, T2)
 
-            cos_sim_tensor = sim_cube[:, 10, :, :]  # cos_similarity<h1add, h2add>
-            print("++++++++++cos_sim_tensor:", cos_sim_tensor.shape, K.int_shape(cos_sim_tensor))
-
-            masks = tf.map_fn(_get_focus_mask, cos_sim_tensor) # (B, T1, T2)
-
-            l2_sim_tensor = sim_cube[:, 11, :, :]   # l2_similarity<h1add, h2add>
-            print("++++++++++l2_sim_tensor:", l2_sim_tensor.shape, K.int_shape(l2_normalize))
-
-            masks = tf.map_fn(_get_focus_mask, l2_sim_tensor) # (B, T1, T2)
-
+            masks = K.expand_dims(K.maximum(cos_masks, l2_masks), axis=1)
             focus_cube = K.concatenate([sim_cube[:, :-1, :, :] * masks, 
                                         sim_cube[:, -1:, :, :]], axis=1)
             return focus_cube
@@ -239,7 +224,8 @@ class PWIM(BaseModel):
             return sim_tensor_shape
 
         return keras.layers.Lambda(function=_get_focus_cube, 
-                                   output_shape=_get_output_shape)
+                                   output_shape=_get_output_shape,
+                                   name='similarity_focus')
 
     def _compute_convnet_output(self, 
                                 x: tf.Tensor, 
@@ -257,24 +243,20 @@ class PWIM(BaseModel):
                                     kernel_size=3,
                                     strides=1,
                                     padding='same',
-                                    activation='relu',
-                                    data_format='channels_first'
-                                    )(x)  # (B, f, T1, T2)
-            print(x.shape)
+                                    activation='relu')(x)  # (B, f, T1, T2)
+            # print(x.shape)
             x = keras.layers.MaxPooling2D(pool_size=2, 
                                           strides=2,
-                                          padding='same',
-                                          data_format='channels_first'
-                                          )(x)
-            print(x.shape)
+                                          padding='same')(x)
+            # print(x.shape)
 
+        x = keras.layers.Flatten()(x)
         x = self._make_multi_layer_perceptron_layer()(x)
 
         # manual log_softmax output layer
         x = self._make_output_layer()(x)    # softmax activation
         x = keras.layers.Lambda(lambda t: K.log(t))(x)
         return x
-
 
     def build(self):
         """Build model."""
@@ -304,26 +286,22 @@ class PWIM(BaseModel):
         # context modeling
         h1_for, h1_back = lstm_layer(h1_emb)          # [B, T_h1, H*2]
         h2_for, h2_back = lstm_layer(h2_emb)          # [B, T_h2, H*2]
-        
-        print("after lstm: ", h1_for.shape, h1_back.shape, h2_for.shape, h2_back.shape)
 
         # mask a_ and b_, since the <pad> position is no more zero
         # a_ = keras.layers.Multiply()([a_, self._expand_dim(a_mask, axis=2)])
         # b_ = keras.layers.Multiply()([b_, self._expand_dim(b_mask, axis=2)])
 
         # pairwise word interaction modeling
-        print("======== BEFORE ===========")
         sim_cube = self._make_sim_cube_layer()([h1_for, h1_back, h2_for, h2_back])
-        print("========== AFTER =========")
-        # sim_cube *= h12_mask
-        print("============sim_cube: ", sim_cube)
+        sim_cube = keras.layers.Multiply()([sim_cube, h12_mask])
 
         # forward pass: similarity focus layer
         focus_cube = self._make_focus_cube_layer()(sim_cube)
-        # focus_cube *= h12_mask
+        focus_cube = keras.layers.Multiply()([focus_cube, h12_mask])
 
-        print("============focus_cube: ", focus_cube)
+        focus_cube = keras.layers.Permute((2, 3, 1))(focus_cube) # (B, T1, T2, 13)
+
         # 19-layer conv net
         filters = [128, 164, 192, 128]
         output = self._compute_convnet_output(focus_cube, filters=filters)
-        self._backend = keras.Model(inputs=[h1, h2], outputs=output)
+        self._backend = keras.Model(inputs=[h1, h2], outputs=[h1_emb, h2_emb])
