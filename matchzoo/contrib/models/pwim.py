@@ -268,7 +268,7 @@ class PWIM(BaseModel):
             lambda x:
                 K.cast(K.not_equal(x, self._params['mask_value']), K.floatx())
         )
-        embedding = self._make_embedding_layer()
+        embedding = self._make_embedding_layer(mask_zero=True)
         lstm_layer = self._make_bilstm_layer(lstm_dim)
 
         # input & mask
@@ -304,4 +304,4 @@ class PWIM(BaseModel):
         # 19-layer conv net
         filters = [128, 164, 192, 128]
         output = self._compute_convnet_output(focus_cube, filters=filters)
-        self._backend = keras.Model(inputs=[h1, h2], outputs=[h1_emb, h2_emb])
+        self._backend = keras.Model(inputs=[h1, h2], outputs=sim_cube)
