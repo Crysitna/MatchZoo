@@ -52,6 +52,12 @@ class PWIM(BaseModel):
 
         return params
 
+    def compile(self, loss=None):
+        if loss == None:
+            loss = self._params['task'].loss
+        self._backend.compile(optimizer=self._params['optimizer'],
+                      loss=loss)
+
     def _expand_dim(self, inp: tf.Tensor, axis: int) -> keras.layers.Layer:
         """
         Wrap keras.backend.expand_dims into a Lambda layer.
@@ -160,7 +166,7 @@ class PWIM(BaseModel):
 
             return (h1for_shape[0], 13, h1for_shape[1], h2for_shape[1]) # (13, T1, T2)
 
-        return keras.layers.Lambda(function=_get_sim_cube, 
+        return keras.layers.Lambda(function=_get_sim_cube,
                                    output_shape=_get_output_shape,
                                    name='pairwise_word_interaction')
 
@@ -179,29 +185,30 @@ class PWIM(BaseModel):
             :param sim_tensor: tf.Tensor with shape (T1, T2)
                 either cos similarity or l2 similarity based on h1_add and h2_add
             :param mask: tf.Tensor with shape (T1, T2)
-                the computation would based on the passed in mask. That is the 
-                entries already set to be 1 in the mask would be skipped) 
+                the computation would based on the passed in mask. That is the
+                entries already set to be 1 in the mask would be skipped)
             :return: tf.Tensor with shape (T1, T2), with focus emtries set to
                 be 1 and others set to be 0.1
             """
-            s1tag = K.zeros_like(sim_tensor[:, 0])   # (T1)
-            s2tag = K.zeros_like(sim_tensor[0, :])   # (T2)
             t1, t2 = K.int_shape(sim_tensor)
 
-            t1 = 20
-            t2 = 40
-            masks = 0.1 * K.ones_like(sim_tensor)   # (T1, T2), intialize masks
-            sim_tensor = K.flatten(sim_tensor)      # (T1*T2)
-            _, idxs = tf.nn.top_k(sim_tensor, k=K.shape(sim_tensor)[-1], sorted=True) # (T1*T2)
+            t1 = 32
+            t2 = 32
+            sim_tensor_flattened = K.flatten(sim_tensor)      # (T1*T2)
+            values, _ = tf.nn.top_k(sim_tensor_flattened, k=K.shape(sim_tensor_flattened)[-1], sorted=True) # (T1*T2)
 
+            masks = K.zeros_like(sim_tensor)   # (T1, T2)
             for t_idx in range(t1*t2):
-                pos1 = idxs[t_idx] // t1    # index for word in sentence 1
-                pos2 = idxs[t_idx] % t1     # index for word in sentence 2
-                if (s1tag[pos1] + s2tag[pos2] == 0):
-                    s1tag[pos1] = 1
-                    s2tag[pos2] = 1
-                    masks[pos1][pos2] = 1
-
+                value = values[t_idx]
+                new_masks = K.cast(K.equal(sim_tensor, value), dtype=sim_tensor.dtype)  # (T1, T2)
+                row = K.sum(new_masks, axis=1, keepdims=True)   # (T1, 1), all 0 but one 1
+                col = K.sum(new_masks, axis=0, keepdims=True)   # (1, T2), all 0 but one 1
+                masks = K.switch(
+                            condition=K.equal(K.sum(masks * row + masks * col), 0),
+                            then_expression= 0.9 * new_masks + masks,
+                            else_expression=masks
+                        )
+            masks += 0.1 * K.ones_like(sim_tensor)
             return masks
 
         def _get_focus_cube(sim_cube):
@@ -212,25 +219,26 @@ class PWIM(BaseModel):
             :return: tf.Tensor with shape (B, 13, T1, T2), sim_cube * mask
             """
             cos_sim_tensor = sim_cube[:, 10, :, :]  # cos_similarity<h1_add, h2_add>
-            cos_masks = tf.map_fn(_get_focus_mask, cos_sim_tensor) # (B, T1, T2)
+            cos_masks = K.map_fn(_get_focus_mask, cos_sim_tensor) # (B, T1, T2)
             l2_sim_tensor = sim_cube[:, 11, :, :]   # l2_similarity<h1_add, h2_add>
-            l2_masks = tf.map_fn(_get_focus_mask, l2_sim_tensor) # (B, T1, T2)
+            l2_masks = K.map_fn(_get_focus_mask, l2_sim_tensor) # (B, T1, T2)
 
             masks = K.expand_dims(K.maximum(cos_masks, l2_masks), axis=1)
-            focus_cube = K.concatenate([sim_cube[:, :-1, :, :] * masks, 
-                                        sim_cube[:, -1:, :, :]], axis=1)
-            return focus_cube
+            focus_cube = K.concatenate([sim_cube[:, :1, :, :],  # the pad indicator
+                                        sim_cube[:, 1:, :, :] * masks], axis=1)
+            # return focus_cube
+            return l2_masks
 
         def _get_output_shape(sim_tensor_shape):
             return sim_tensor_shape
 
-        return keras.layers.Lambda(function=_get_focus_cube, 
+        return keras.layers.Lambda(function=_get_focus_cube,
                                    output_shape=_get_output_shape,
                                    name='similarity_focus')
 
-    def _compute_convnet_output(self, 
-                                x: tf.Tensor, 
-                                filters: list) -> tf.Tensor: 
+    def _compute_convnet_output(self,
+                                x: tf.Tensor,
+                                filters: list) -> tf.Tensor:
         """
         Pass the input focus_cube to the 19 layers convolution network
 
@@ -246,7 +254,7 @@ class PWIM(BaseModel):
                                     padding='same',
                                     activation='relu')(x)  # (B, f, T1, T2)
             # print(x.shape)
-            x = keras.layers.MaxPooling2D(pool_size=2, 
+            x = keras.layers.MaxPooling2D(pool_size=2,
                                           strides=2,
                                           padding='same')(x)
             # print(x.shape)
@@ -293,16 +301,23 @@ class PWIM(BaseModel):
         # b_ = keras.layers.Multiply()([b_, self._expand_dim(b_mask, axis=2)])
 
         # pairwise word interaction modeling
+        # create_neg_pads = keras.layers.Lambda(lambda x: x + 1e6 * (x - 1))  # set them to be large negative values
+        create_neg_pads = keras.layers.Lambda(lambda x: 1e6 * (x - 1))  # set them to be large negative values
+        # keras.layers.Multiply()([keras.layers.Subtract()([0, h12_mask]), 1e-7])
         sim_cube = self._make_sim_cube_layer()([h1_for, h1_back, h2_for, h2_back])
-        sim_cube = keras.layers.Multiply()([sim_cube, h12_mask])
+        # sim_cube = keras.layers.Multiply()([sim_cube, h12_mask])
+        # sim_cube = keras.layers.Multiply()([sim_cube, create_neg_pads(h12_mask)])
+        sim_cube = keras.layers.Add()([sim_cube, create_neg_pads(h12_mask)])
 
         # forward pass: similarity focus layer
-        focus_cube = self._make_focus_cube_layer()(sim_cube)
-        focus_cube = keras.layers.Multiply()([focus_cube, h12_mask])
+        masks = self._make_focus_cube_layer()(sim_cube)
 
-        focus_cube = keras.layers.Permute((2, 3, 1))(focus_cube) # (B, T1, T2, 13)
-
-        # 19-layer conv net
-        filters = [128, 164, 192, 128]
-        output = self._compute_convnet_output(focus_cube, filters=filters)
-        self._backend = keras.Model(inputs=[h1, h2], outputs=sim_cube)
+        # focus_cube = self._make_focus_cube_layer()(sim_cube)
+        # focus_cube = keras.layers.Multiply()([focus_cube, h12_mask])
+        # focus_cube = keras.layers.Permute((2, 3, 1))(focus_cube) # (B, T1, T2, 13)
+        #
+        # # 19-layer conv net
+        # filters = [128, 164, 192, 192, 128]
+        # output = self._compute_convnet_output(focus_cube, filters=filters)
+        # self._backend = keras.Model(inputs=[h1, h2], outputs=sim_cube)
+        self._backend = keras.Model(inputs=[h1, h2], outputs=[sim_cube, masks])
