@@ -229,7 +229,7 @@ class PWIM(BaseModel):
 
             masks = K.expand_dims(K.maximum(cos_masks, l2_masks), axis=1)
             focus_cube = K.concatenate([sim_cube[:, :1, :, :],  # the pad indicator
-                                        sim_cube[:, 1:, :, :] * masks], axis=1)
+                                        sim_cube[:, 1:, :, :] + masks], axis=1)
                                         # sim_cube[:, 1:, :, :] * masks], axis=1)
             return focus_cube
             # return masks
