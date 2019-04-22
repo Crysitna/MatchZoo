@@ -16,7 +16,7 @@ class PWIM(BaseModel):
         >>> model = PWIM()
         >>> task = classification_task = mz.tasks.Classification(num_classes=2)
         >>> model.params['task'] = task
-        >>> model.params['input_shapes'] = [(20, ), (40, )]
+        >>> model.params['input_shapes'] = [(32, ), (32, )]
         >>> model.params['lstm_dim'] = 300
         >>> model.params['mlp_num_units'] = 300
         >>> model.params['embedding_input_dim'] =  5000
@@ -88,7 +88,8 @@ class PWIM(BaseModel):
         """
         tensor1 = K.expand_dims(tensor1, axis=2) # shape (B, T1, 1, H)
         tensor2 = K.expand_dims(tensor2, axis=1) # shape (B, 1, T2, H)
-        return K.sqrt(K.sum(K.square(tensor1 - tensor2), axis=-1))
+        return K.sqrt(K.maximum(K.sum(K.square(tensor1 - tensor2), axis=-1), K.epsilon()))
+        # return K.sqrt(K.sum(K.square(tensor1 - tensor2), axis=-1))
 
     def _calc_dot_prod(self,
                        tensor1: tf.Tensor,
@@ -199,12 +200,14 @@ class PWIM(BaseModel):
 
             masks = K.zeros_like(sim_tensor)   # (T1, T2)
             for t_idx in range(t1*t2):
+                # for t_idx in range(int(t1*t2/2)):
                 value = values[t_idx]
                 new_masks = K.cast(K.equal(sim_tensor, value), dtype=sim_tensor.dtype)  # (T1, T2)
                 row = K.sum(new_masks, axis=1, keepdims=True)   # (T1, 1), all 0 but one 1
                 col = K.sum(new_masks, axis=0, keepdims=True)   # (1, T2), all 0 but one 1
                 masks = K.switch(
-                            condition=K.equal(K.sum(masks * row + masks * col), 0),
+                            condition=K.all([K.equal(K.sum(masks * row + masks * col), 0),
+                                             K.greater(value, -1e5)]),
                             then_expression= 0.9 * new_masks + masks,
                             else_expression=masks
                         )
@@ -226,8 +229,9 @@ class PWIM(BaseModel):
             masks = K.expand_dims(K.maximum(cos_masks, l2_masks), axis=1)
             focus_cube = K.concatenate([sim_cube[:, :1, :, :],  # the pad indicator
                                         sim_cube[:, 1:, :, :] * masks], axis=1)
-            # return focus_cube
-            return l2_masks
+                                        # sim_cube[:, 1:, :, :] * masks], axis=1)
+            return focus_cube
+            # return masks
 
         def _get_output_shape(sim_tensor_shape):
             return sim_tensor_shape
@@ -264,7 +268,7 @@ class PWIM(BaseModel):
 
         # manual log_softmax output layer
         x = self._make_output_layer()(x)    # softmax activation
-        x = keras.layers.Lambda(lambda t: K.log(t))(x)
+        # x = keras.layers.Lambda(lambda t: K.log(t))(x)
         return x
 
     def build(self):
@@ -272,13 +276,11 @@ class PWIM(BaseModel):
         # parameters
         lstm_dim = self._params['lstm_dim']
 
-        # layers
         create_mask = keras.layers.Lambda(
             lambda x:
-                K.cast(K.not_equal(x, self._params['mask_value']), K.floatx())
+                K.cast(K.not_equal(x, self._params['mask_value']), K.floatx()),
+            name='create_mask'
         )
-        embedding = self._make_embedding_layer(mask_zero=True)
-        lstm_layer = self._make_bilstm_layer(lstm_dim)
 
         # input & mask
         h1, h2 = self._make_inputs()     # [B, T_h1], [B, T_h2]
@@ -289,35 +291,27 @@ class PWIM(BaseModel):
              self._expand_dim(h2_mask, axis=1)])   # [B, 1, T_h2]
 
         # embedding
+        embedding = self._make_embedding_layer(mask_zero=True)
         h1_emb = embedding(h1)   # [B, T_h1, E_dim]
         h2_emb = embedding(h2)   # [B, T_h2, E_dim]
 
         # context modeling
+        lstm_layer = self._make_bilstm_layer(lstm_dim)
         h1_for, h1_back = lstm_layer(h1_emb)          # [B, T_h1, H*2]
         h2_for, h2_back = lstm_layer(h2_emb)          # [B, T_h2, H*2]
 
-        # mask a_ and b_, since the <pad> position is no more zero
-        # a_ = keras.layers.Multiply()([a_, self._expand_dim(a_mask, axis=2)])
-        # b_ = keras.layers.Multiply()([b_, self._expand_dim(b_mask, axis=2)])
-
         # pairwise word interaction modeling
-        # create_neg_pads = keras.layers.Lambda(lambda x: x + 1e6 * (x - 1))  # set them to be large negative values
         create_neg_pads = keras.layers.Lambda(lambda x: 1e6 * (x - 1))  # set them to be large negative values
-        # keras.layers.Multiply()([keras.layers.Subtract()([0, h12_mask]), 1e-7])
         sim_cube = self._make_sim_cube_layer()([h1_for, h1_back, h2_for, h2_back])
-        # sim_cube = keras.layers.Multiply()([sim_cube, h12_mask])
-        # sim_cube = keras.layers.Multiply()([sim_cube, create_neg_pads(h12_mask)])
         sim_cube = keras.layers.Add()([sim_cube, create_neg_pads(h12_mask)])
 
         # forward pass: similarity focus layer
-        masks = self._make_focus_cube_layer()(sim_cube)
+        focus_cube = self._make_focus_cube_layer()(sim_cube)
+        focus_cube = keras.layers.Multiply()([focus_cube, h12_mask])
+        focus_cube = keras.layers.Permute((2, 3, 1))(focus_cube) # (B, T1, T2, 13)
 
-        # focus_cube = self._make_focus_cube_layer()(sim_cube)
-        # focus_cube = keras.layers.Multiply()([focus_cube, h12_mask])
-        # focus_cube = keras.layers.Permute((2, 3, 1))(focus_cube) # (B, T1, T2, 13)
-        #
-        # # 19-layer conv net
-        # filters = [128, 164, 192, 192, 128]
-        # output = self._compute_convnet_output(focus_cube, filters=filters)
-        # self._backend = keras.Model(inputs=[h1, h2], outputs=sim_cube)
-        self._backend = keras.Model(inputs=[h1, h2], outputs=[sim_cube, masks])
+        # 19-layer conv net
+        filters = [128, 164, 192, 192, 128]
+        output = self._compute_convnet_output(focus_cube, filters=filters)
+        self._backend = keras.Model(inputs=[h1, h2], outputs=output)
+        # self._backend = keras.Model(inputs=[h1, h2], outputs=[sim_cube, focus_cube])

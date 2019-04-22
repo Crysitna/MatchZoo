@@ -8,11 +8,10 @@ sess = tf.Session(config=config)
 set_session(sess)  # set this TensorFlow session as the default session for Keras
 
 import random
-
 import numpy as np
 import pandas as pd
 import keras.backend as K
-from keras.optimizers import Adam
+from keras.optimizers import RMSprop
 from keras.utils import to_categorical
 
 import matchzoo as mz
@@ -25,8 +24,8 @@ from scripts.esim_data_prep import load_train_data, load_val_data, load_test_dat
 # test esim with wiki_qa
 epochs = 15
 lstm_dim = 200
-batch_size = 5
-vocab_size = 3000
+batch_size = 32
+vocab_size = 6435
 fixed_length_left = 32
 fixed_length_right = 32
 
@@ -58,7 +57,7 @@ def _get_focus_mask(sim_tensor):
     return masks
 
 # construct model
-def prepare_model():
+def prepare_model(load_emb=False, preprocessor=None):
     model = PWIM()
     classification_task = mz.tasks.Classification(num_classes=2)
     model.params['task'] = classification_task
@@ -68,20 +67,34 @@ def prepare_model():
     model.params['lstm_dim'] = lstm_dim
     # model.params['embedding_input_dim'] = preprocessor.context['vocab_size']
     model.params['embedding_input_dim'] = vocab_size
-    model.params['embedding_output_dim'] = lstm_dim
+    model.params['embedding_output_dim'] = 300
     model.params['embedding_trainable'] = False
 
     model.params['mlp_num_units'] = 128
     model.params['mlp_num_layers'] = 0
     model.params['mlp_num_fan_out'] = 128
     model.params['mlp_activation_func'] = 'relu'
-    model.params['optimizer'] = Adam(lr=1e-4)
+    model.params['optimizer'] = RMSprop(lr=1e-4)
 
     model.guess_and_fill_missing_params()
     model.build()
 
     model.compile(loss='hinge')
     model.backend.summary() # not visualize
+
+    if load_emb:
+        assert (preprocessor != None)
+        import csv
+        file_path = "~/datasets/pretrain_emb/glove.840B.300d.txt"
+        data = pd.read_table(file_path,
+                             sep=" ",
+                             index_col=0,
+                             header=None,
+                             quoting=csv.QUOTE_NONE)
+
+        googlenews_embedding = mz.embedding.Embedding(data)
+        embedding_matrix = googlenews_embedding.build_matrix(preprocessor.context['vocab_unit'].state['term_index'], initializer=lambda: 0)
+        model.load_embedding_matrix(embedding_matrix)
 
     return model
 
@@ -94,7 +107,7 @@ def _print_pad_matrix(arr, name):
     print(name+" axis 0: \n", arr.sum(axis=-1))    # (xx, a, 1)
     print(name+" axis 1: \n", arr.sum(axis=-2))    # (xx, 1, b)
 
-def prepare_sample_input(rand=True):
+def prepare_sample_input(rand=True, num_pad=None):
     if rand:
         X_left = np.random.randint(low=1, high=vocab_size,
                                    size=(batch_size, fixed_length_left))
@@ -109,12 +122,15 @@ def prepare_sample_input(rand=True):
     pads_left = []
     pads_right = []
     for i in range(batch_size):
-        num_pad = random.randint(0, 10)
+        if num_pad == None:
+            num_pad = random.randint(0, 10)
         pads_left.append(num_pad)
         X_left[i, -num_pad:] = 0
 
-        num_pad = random.randint(0, 15)
+        if num_pad == None:
+            num_pad = random.randint(0, 15)
         X_right[i, -num_pad:] = 0
+
         pads_right.append(num_pad)
 
     _print_pad(X_left, name="X_left")
@@ -122,6 +138,18 @@ def prepare_sample_input(rand=True):
 
     mask = np.array([np.dot(l[:, None], r[None, :]) != 0 for l, r in zip(X_left, X_right)], dtype=np.float64)
     return X_left, X_right, Y, mask
+
+def prepare_true_input():
+    preprocessor = mz.preprocessors.BasicPreprocessor(fixed_length_left=fixed_length_left,
+                                                      fixed_length_right=fixed_length_right,
+                                                      remove_stop_words=False,
+                                                      filter_low_freq=10)
+
+    train_X, train_Y_, preprocessor = load_train_data(preprocessor, False)
+    for k in train_X.keys():
+        train_X[k] = train_X[k][:batch_size]
+    Y = to_categorical(train_Y_)[:batch_size]
+    return train_X, Y, preprocessor
 
 def test_mask_zero():
     """
@@ -183,11 +211,9 @@ def test_get_focus_mask():
         for idx in sorted_idx[::-1]:
             x_i = idx // 32
             y_i = idx % 32
-            # assert (m[x_i][y_i] == 1 or m[x_i][y_i] == 0.1)
             if(m[x_i][y_i] != 1 and (not (m[x_i][y_i] > 0.0999 and m[x_i][y_i]) < 0.1001)):
                 print("exceptions: ", x_i, y_i, m[x_i][y_i])
 
-            # if(m[x_i][y_i] > 0.999 and m[x_i][y_i] < 1.001):
             if(m[x_i][y_i] > 0.11):
                 print(x_i, y_i,"\torigin: ", sim_tensor_n[x_i][y_i], "\tmask value:", m[x_i][y_i])
                 x_collection.append(x_i)
@@ -214,97 +240,100 @@ def test_focuscube_layer_mask():
     for i in range(batch_size):
         print(i, "the batch")
 
-
-def test_focuscube_layer_content():
-    X_left, X_right, Y, _ = prepare_sample_input()
+def test_focuscube_single_layer_content():
+    # X_left, X_right, Y, _ = prepare_sample_input(num_pad=28)
+    X_left, X_right, Y, _ = prepare_true_input()
     model = prepare_model()
 
     sims, focuscubes = model.predict(x=[X_left, X_right], batch_size=batch_size)
+    print("=="*20, "FOCUS CUBE: ", focuscubes.shape)
+
     for i in range(batch_size):
         print(i, "the batch")
-        # focuscube = focuscubes[i, :, :, 0]
-        focuscube = focuscubes[i, :, :]
-        sim = sims[i, 11, :, :]
+        focuscube = focuscubes[i, 0, :, :]
+        # focuscube = focuscubes[i, :, :]
+        sim = sims[i, 10, :, :]
 
-        sim_s = np.sort(sim, axis=None)[-10:]
-        print(sim_s)
+        sim_s = np.sort(sim, axis=None)
+        # print(sim_s[-10:])
+        # print(sim_s[sim_s>-1e5][:10])
+
+
+        # look into the simcube:
+        print("cos")
+        sim_cos = np.sort(sims[i, 10, :, :], axis=None)
+        print("largest few: \n", sim_cos[-10:][::-1])
+        print("smallest few: \n", sim_cos[sim_cos>-1e5][:10])
+
+        print("l2")
+        sim_l2 = np.sort(sims[i, 11, :, :], axis=None)
+        print("largest few: \n", sim_l2[-10:][::-1])
+        print("smallest few: \n", sim_l2[sim_l2>-1e5][:10])
+
+        print("dot")
+        sim_dot = np.sort(sims[i, 12, :, :], axis=None)
+        print("largest few: \n", sim_dot[-10:][::-1])
+        print("smallest few: \n", sim_dot[sim_dot>-1e5][:10])
+
         sorted_idx = np.argsort(focuscube, axis=None)
 
         for idx in sorted_idx[::-1]:
             x_i = idx // 32
             y_i = idx % 32
             if focuscube[x_i][y_i] > 0.11:
-                print("[{}][{}]: {} {}".format(x_i, y_i, focuscube[x_i][y_i], sim[x_i][y_i]))
+            # if True:
+                print("[{}][{}]: {}".format(x_i, y_i, focuscube[x_i][y_i]), end="\t")
+                print("cos: ", sims[i, 10, :, :][x_i][y_i], end="\t")
+                print("l2: ", sims[i, 11, :, :][x_i][y_i], end="\t")
+                print("dot: ", sims[i, 12, :, :][x_i][y_i])
 
-# prepare_sample_input()
-# test_mask_zero()
-# test_sim_cube()
-# test_get_focus_mask()
-test_focuscube_layer_content()
+def test_focuscube_visualize():
+    X, Y, preprocessor = prepare_true_input()
+    X_left, X_right = X['text_left'], X['text_right']
+    model = prepare_model()
+    sims, focuses = model.predict(x=[X_left, X_right], batch_size=1)
 
-# prepare data
-# preprocessor = mz.preprocessors.BasicPreprocessor(fixed_length_left=fixed_length_left,
-                                                  # fixed_length_right=fixed_length_right,
-                                                  # remove_stop_words=False,
-                                                  # filter_low_freq=10)
+    s = sims[3]
+    f = focuses[3]
 
-# train_X, train_Y_, preprocessor = load_train_data(preprocessor, False)
-# val_X, val_Y = load_val_data(preprocessor)
-# pred_X1, pred_Y1 = load_test_data(preprocessor, True)
-# pred_X2, pred_Y2 = load_test_data(preprocessor, False)
+    import seaborn as sns
+    import matplotlib.pyplot as plt
 
-# train_Y = to_categorical(train_Y_)
-# print(train_Y)
+    names = ["pad", 'bi_cos', 'bi_l2', 'bi_dot', 'for_cos', 'for_l2', 'for_dot', 'back_cos', 'back_l2', 'back_dot', 'add_cos', 'add_l2', 'add_dot']
+    for i, name in enumerate(names):
+        fig = plt.figure()
+        plt.subplot(2, 1, 1)
+        s[i, :, :][s[i, :, :] < -1e4] = s[i, :, :][s[i, :, :] > -1e4].min() - 0.01
+        sns.heatmap(s[i, :, :])
+        plt.subplot(2, 1, 2)
+        # f[:, :, i][f[:, :, i] < -1e4] = f[:, :, i][f[:, :, i] > -1e4].min() - 0.01
+        sns.heatmap(f[:, :, i])
+        fig.suptitle(name)
+        plt.savefig("{}.png".format(i))
 
+def inspect_output():
+    X, Y, preprocessor = prepare_true_input()
+    X_left, X_right = X['text_left'], X['text_right']
+    model = prepare_model()
 
-# import csv
-# file_path = "~/datasets/pretrain_emb/glove.840B.300d.txt"
-# data = pd.read_table(file_path,
-                     # sep=" ",
-                     # index_col=0,
-                     # header=None,
-                     # quoting=csv.QUOTE_NONE)
+    preds = model.predict(x=[X_left, X_right], batch_size=batch_size)
+    
+    for t, p in zip(Y, preds):
+        print("true: {}\t pred: {}".format(t, p))
 
-# googlenews_embedding = mz.embedding.Embedding(data)
-# embedding_matrix = googlenews_embedding.build_matrix(preprocessor.context['vocab_unit'].state['term_index'], initializer=lambda: 0)
+def mini_train():
+    X, Y, preprocessor = prepare_true_input()
+    model = prepare_model(load_emb=True, preprocessor=preprocessor)
 
-# model.load_embedding_matrix(embedding_matrix)
+    history = model.fit(x = [X['text_left'],
+                             X['text_right']],
+                        y = Y,                                  # (20360, 2)
+                        validation_data = (X, Y),
+                        batch_size = batch_size,
+                        epochs = epochs,
+                        callbacks=[MapMrrCallback(X, Y), 
+                                   TensorBoardCallback(logdir='./logdir', update_freq=1e3)])
+    preds = model.predict(x=[X_left, X_right], batch_size=batch_size)
 
-# history = model.fit(x = [train_X['text_left'],
-                         # train_X['text_right']],                  # (20360, 1000)
-                    # y = train_Y,                                  # (20360, 2)
-                    # validation_data = (val_X, val_Y),
-                    # batch_size = batch_size,
-                    # epochs = epochs,
-                    # callbacks=[MapMrrCallback(pred_X1, pred_Y1)]
-                    # )
-
-# ###############################################
-# # evaluation with MAP & MRR
-
-# for X, Y in [[pred_X1, pred_Y1], [pred_X2, pred_Y2], [train_X, train_Y_]]:
-    # print("Predict dataset size: ", Y.shape)
-
-    # num_pred_data = Y.shape[0]
-    # pred_y_full = model.predict(X, batch_size=32)
-    # pred_y = np.argmax(pred_y_full, axis=-1)[:, np.newaxis]     # (num_pred, 1)
-
-    # print("Y: num_pos: {} num_neg: {}".format((Y == 1).sum(), (Y == 0).sum()))
-
-    # qids = X["id_left"]                 # (6165, )
-    # predictions = pred_y_full[:, 1]     # (6165, ) pred value for label 1
-    # labels = Y[:, 0]                    # (6165, )
-    # print("qids: {}, predictions: {}, labels: {}".format(qids.shape, predictions.shape, labels.shape))
-
-    # mAP, mrr = get_map_mrr(qids, predictions, labels)
-
-    # correct_idx = (pred_y == Y)
-    # wrong_idx = (pred_y != Y)
-    # print("====================================")
-    # print("true pos:", ((pred_y == 1) * correct_idx).sum(), " || false pos:", ((pred_y == 1) * wrong_idx).sum())
-    # print("true neg:", ((pred_y == 0) * correct_idx).sum(), " || false neg:", ((pred_y == 0) * wrong_idx).sum())
-    # print("====================================")
-    # print("mAP: ", mAP)
-    # print("mrr: ", mrr)
-    # print("====================================")
-    # print()
+# test_focuscube_visualize()
+mini_train()
