@@ -61,6 +61,7 @@ class PWIM(BaseModel):
     def _expand_dim(self, inp: tf.Tensor, axis: int) -> keras.layers.Layer:
         """
         Wrap keras.backend.expand_dims into a Lambda layer.
+
         :param inp: input tensor to expand the dimension
         :param axis: the axis of new dimension
         """
@@ -69,6 +70,7 @@ class PWIM(BaseModel):
     def _make_bilstm_layer(self, lstm_dim: int) -> keras.layers.Layer:
         """
         Bidirectional LSTM layer in PWIM.
+
         :param lstm_dim: int, dimension of LSTM layer
         :return: `keras.layers.Layer`.
         """
@@ -109,7 +111,6 @@ class PWIM(BaseModel):
                            tensor2: tf.Tensor) -> tf.Tensor:
         """
         Calculate the cosine similarity between two tensors
-
         :param tensor1: tf.Tensor, shape (B, T1, H)
         :param tensor2: tf.Tensor, shape (B, T2, H)
         :return: tf.Tensor, shape (B, T1, T2)
@@ -123,7 +124,6 @@ class PWIM(BaseModel):
                            tensor2: tf.Tensor) -> tf.Tensor:
         """
         Stack the cos, l2, dot distance results along axis 1
-
         :param tensor1: tf.Tensor, shape (B, T1, H)
         :param tensor2: tf.Tensor, shape (B, T2, H)
         :return: tf.Tensor, shape (B, 3, T1, T2)
@@ -139,6 +139,7 @@ class PWIM(BaseModel):
         The layer expects input: [tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]
         with shape (B, T1, H), (B, T1, H), (B, T2, H), (B, T2, H) outputs
         tf.Tensor with shape (B, 13, T1, T2)
+
 
         :return: keras.layers.Layer
         """
@@ -271,11 +272,11 @@ class PWIM(BaseModel):
         # x = keras.layers.Lambda(lambda t: K.log(t))(x)
         return x
 
+
     def build(self):
         """Build model."""
         # parameters
         lstm_dim = self._params['lstm_dim']
-
         create_mask = keras.layers.Lambda(
             lambda x:
                 K.cast(K.not_equal(x, self._params['mask_value']), K.floatx()),
@@ -314,4 +315,3 @@ class PWIM(BaseModel):
         filters = [128, 164, 192, 192, 128]
         output = self._compute_convnet_output(focus_cube, filters=filters)
         self._backend = keras.Model(inputs=[h1, h2], outputs=output)
-        # self._backend = keras.Model(inputs=[h1, h2], outputs=[sim_cube, focus_cube])
