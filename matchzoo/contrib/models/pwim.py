@@ -8,7 +8,6 @@ from matchzoo.engine.param import Param
 from matchzoo.engine.base_model import BaseModel
 from matchzoo.engine.param_table import ParamTable
 
-
 class PWIM(BaseModel):
     """
     PWIM model.
@@ -74,6 +73,9 @@ class PWIM(BaseModel):
         :param lstm_dim: int, dimension of LSTM layer
         :return: `keras.layers.Layer`.
         """
+        # return keras.layers.Bidirectional(
+            # layer=keras.layers.LSTM(lstm_dim, return_sequences=True, input_length=self.params['input_shapes'][0]),
+            # merge_mode=None)
         return keras.layers.Bidirectional(
             layer=keras.layers.LSTM(lstm_dim, return_sequences=True),
             merge_mode=None)
@@ -91,7 +93,6 @@ class PWIM(BaseModel):
         tensor1 = K.expand_dims(tensor1, axis=2) # shape (B, T1, 1, H)
         tensor2 = K.expand_dims(tensor2, axis=1) # shape (B, 1, T2, H)
         return K.sqrt(K.maximum(K.sum(K.square(tensor1 - tensor2), axis=-1), K.epsilon()))
-        # return K.sqrt(K.sum(K.square(tensor1 - tensor2), axis=-1))
 
     def _calc_dot_prod(self,
                        tensor1: tf.Tensor,
@@ -139,7 +140,6 @@ class PWIM(BaseModel):
         The layer expects input: [tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]
         with shape (B, T1, H), (B, T1, H), (B, T2, H), (B, T2, H) outputs
         tf.Tensor with shape (B, 13, T1, T2)
-
 
         :return: keras.layers.Layer
         """
@@ -193,9 +193,15 @@ class PWIM(BaseModel):
                 be 1 and others set to be 0.1
             """
             t1, t2 = K.int_shape(sim_tensor)
+            print("========================")
+            print("t1: ", t1, " t2", t2)
+            print("========================")
 
-            t1 = 32
-            t2 = 32
+            assert (t1 == t2)
+            assert (t1 == 32 or t1 == 48)
+
+            # t1 = 32
+            # t2 = 32
             sim_tensor_flattened = K.flatten(sim_tensor)      # (T1*T2)
             values, _ = tf.nn.top_k(sim_tensor_flattened, k=K.shape(sim_tensor_flattened)[-1], sorted=True) # (T1*T2)
 
@@ -229,10 +235,9 @@ class PWIM(BaseModel):
 
             masks = K.expand_dims(K.maximum(cos_masks, l2_masks), axis=1)
             focus_cube = K.concatenate([sim_cube[:, :1, :, :],  # the pad indicator
-                                        sim_cube[:, 1:, :, :] + masks], axis=1)
-                                        # sim_cube[:, 1:, :, :] * masks], axis=1)
+                                        sim_cube[:, 1:, :, :] * masks], axis=1)
+                                        # sim_cube[:, 1:, :, :] + masks], axis=1)
             return focus_cube
-            # return masks
 
         def _get_output_shape(sim_tensor_shape):
             return sim_tensor_shape
@@ -258,20 +263,17 @@ class PWIM(BaseModel):
                                     strides=1,
                                     padding='same',
                                     activation='relu')(x)  # (B, f, T1, T2)
-            # print(x.shape)
             x = keras.layers.MaxPooling2D(pool_size=2,
                                           strides=2,
                                           padding='same')(x)
-            # print(x.shape)
 
         x = keras.layers.Flatten()(x)
         x = self._make_multi_layer_perceptron_layer()(x)
 
         # manual log_softmax output layer
         x = self._make_output_layer()(x)    # softmax activation
-        # x = keras.layers.Lambda(lambda t: K.log(t))(x)
+        x = keras.layers.Lambda(lambda t: K.log(t))(x)
         return x
-
 
     def build(self):
         """Build model."""
@@ -284,7 +286,7 @@ class PWIM(BaseModel):
         )
 
         # input & mask
-        h1, h2 = self._make_inputs()     # [B, T_h1], [B, T_h2]
+        h1, h2 = self._make_inputs()      # [B, T_h1], [B, T_h2]
         h1_mask = create_mask(h1)         # [B, T_h1]
         h2_mask = create_mask(h2)         # [B, T_h2]
         h12_mask = keras.layers.Multiply()(        # h12_mask: [B, T_h1, T_h2]
