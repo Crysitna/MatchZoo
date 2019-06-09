@@ -51,12 +51,6 @@ class PWIM(BaseModel):
 
         return params
 
-    def compile(self, loss=None):
-        if loss == None:
-            loss = self._params['task'].loss
-        self._backend.compile(optimizer=self._params['optimizer'],
-                      loss=loss)
-
     def _expand_dim(self, inp: tf.Tensor, axis: int) -> keras.layers.Layer:
         """
         Wrap keras.backend.expand_dims into a Lambda layer.
@@ -73,9 +67,6 @@ class PWIM(BaseModel):
         :param lstm_dim: int, dimension of LSTM layer
         :return: `keras.layers.Layer`.
         """
-        # return keras.layers.Bidirectional(
-            # layer=keras.layers.LSTM(lstm_dim, return_sequences=True, input_length=self.params['input_shapes'][0]),
-            # merge_mode=None)
         return keras.layers.Bidirectional(
             layer=keras.layers.LSTM(lstm_dim, return_sequences=True),
             merge_mode=None)
@@ -193,21 +184,17 @@ class PWIM(BaseModel):
                 be 1 and others set to be 0.1
             """
             t1, t2 = K.int_shape(sim_tensor)
-            print("========================")
-            print("t1: ", t1, " t2", t2)
-            print("========================")
 
             assert (t1 == t2)
             assert (t1 == 32 or t1 == 48)
 
-            # t1 = 32
-            # t2 = 32
             sim_tensor_flattened = K.flatten(sim_tensor)      # (T1*T2)
             values, _ = tf.nn.top_k(sim_tensor_flattened, k=K.shape(sim_tensor_flattened)[-1], sorted=True) # (T1*T2)
 
             masks = K.zeros_like(sim_tensor)   # (T1, T2)
             for t_idx in range(t1*t2):
                 # for t_idx in range(int(t1*t2/2)):
+
                 value = values[t_idx]
                 new_masks = K.cast(K.equal(sim_tensor, value), dtype=sim_tensor.dtype)  # (T1, T2)
                 row = K.sum(new_masks, axis=1, keepdims=True)   # (T1, 1), all 0 but one 1
@@ -252,20 +239,35 @@ class PWIM(BaseModel):
         """
         Pass the input focus_cube to the 19 layers convolution network
 
-        :param x: tf.Tensor, shape (B, 13, T1, T2)
+        :param x: tf.Tensor, shape (B, T1, T2, 13)
             (expected the output of focus_cube_layer)
         :param filters: list, number of out channels for each Conv2D layer
         :return : tf.Tensor, the final output of convnet and this PWIM
         """
+        filters = [128, 164, 192, 192, 128]
+        _, t1, t2, _ = K.int_shape(x)
+
+        assert (t1 == t2)
+        assert (t1 == 32 or t1 == 48)
+
+        max_pool = keras.layers.MaxPooling2D(pool_size=2,
+                                             strides=2,
+                                             padding='same')
+        max_pool_final = max_pool
+        if (t1 == 48):
+            max_pool_final = keras.layers.MaxPooling2D(pool_size=3,
+                                                       strides=1,
+                                                       padding='same')
         for i, f in enumerate(filters):
             x = keras.layers.Conv2D(filters=f,
                                     kernel_size=3,
                                     strides=1,
                                     padding='same',
                                     activation='relu')(x)  # (B, f, T1, T2)
-            x = keras.layers.MaxPooling2D(pool_size=2,
-                                          strides=2,
-                                          padding='same')(x)
+            if i == 4:
+                x = max_pool_final(x)
+            else:
+                x = max_pool(x)
 
         x = keras.layers.Flatten()(x)
         x = self._make_multi_layer_perceptron_layer()(x)

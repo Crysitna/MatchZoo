@@ -3,6 +3,7 @@ import numpy as np
 
 from keras import layers, backend as K
 
+import tensorflow as tf
 
 class RankCrossEntropyLoss(object):
     """
@@ -17,7 +18,6 @@ class RankCrossEntropyLoss(object):
         >>> loss = K.eval(RankCrossEntropyLoss(num_neg=2)(x_true, x_pred))
         >>> np.isclose(loss, expect[0]).all()
         True
-
     """
 
     def __init__(self, num_neg: int = 1):
@@ -36,6 +36,9 @@ class RankCrossEntropyLoss(object):
         :param y_pred: Predicted result.
         :return: Crossentropy loss computed by user-defined negative number.
         """
+
+        y_pred = tf.Print(input_=y_pred, data=[y_pred])
+
         logits = layers.Lambda(lambda a: a[::(self._num_neg + 1), :])(y_pred)
         labels = layers.Lambda(lambda a: a[::(self._num_neg + 1), :])(y_true)
         logits, labels = [logits], [labels]
@@ -46,9 +49,13 @@ class RankCrossEntropyLoss(object):
                 lambda a: a[neg_idx + 1::(self._num_neg + 1), :])(y_true)
             logits.append(neg_logits)
             labels.append(neg_labels)
+
         logits = K.concatenate(logits, axis=-1)
         labels = K.concatenate(labels, axis=-1)
-        return -K.mean(K.sum(labels * K.log(K.softmax(logits)), axis=-1))
+
+        loss = -K.mean(K.sum(labels * K.log(K.softmax(logits)), axis=-1))
+        # loss = tf.Print(input_=loss, data=[loss])
+        return loss
 
     @property
     def num_neg(self):

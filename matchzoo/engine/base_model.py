@@ -511,7 +511,10 @@ class BaseModel(abc.ABC):
         if isinstance(task, tasks.Classification):
             return keras.layers.Dense(task.num_classes, activation='softmax')
         elif isinstance(task, tasks.Ranking):
-            return keras.layers.Dense(1, activation='linear')
+            return keras.layers.Dense(1,
+                                      kernel_initializer=keras.initializers.Constant(value=0.08),
+                                      bias_initializer=keras.initializers.Constant(value=0.09),
+                                      activation='linear')
         else:
             raise ValueError(f"{task} is not a valid task type."
                              f"Must be in `Ranking` and `Classification`.")
@@ -539,12 +542,15 @@ class BaseModel(abc.ABC):
             activation = self._params['mlp_activation_func']
             for _ in range(self._params['mlp_num_layers']):
                 x = keras.layers.Dense(self._params['mlp_num_units'],
+                                       kernel_initializer=keras.initializers.Constant(value=0.003),
+                                       bias_initializer=keras.initializers.Constant(value=0.04),
                                        activation=activation)(x)
             return keras.layers.Dense(self._params['mlp_num_fan_out'],
+                                      kernel_initializer=keras.initializers.Constant(value=0.005),
+                                      bias_initializer=keras.initializers.Constant(value=0.06),
                                       activation=activation)(x)
 
         return _wrapper
-
 
 def load_model(dirpath: typing.Union[str, Path]) -> BaseModel:
     """

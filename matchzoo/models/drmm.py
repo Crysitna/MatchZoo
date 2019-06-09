@@ -100,7 +100,10 @@ class DRMM(BaseModel):
         :return: The masked output tensor.
         """
         # shape = [B, L, 1]
-        dense_input = keras.layers.Dense(1, use_bias=False)(attention_input)
+        dense_input = keras.layers.Dense(1,
+                                         kernel_initializer=keras.initializers.Constant(value=0.07),
+                                         use_bias=False)(attention_input)
+        cls.dense_input = dense_input
         if attention_mask is not None:
             # Since attention_mask is 1.0 for positions we want to attend and
             # 0.0 for masked positions, this operation will create a tensor

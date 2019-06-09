@@ -279,7 +279,9 @@ class DataGenerator(keras.utils.Sequence):
         pairs = []
         groups = relation.sort_values(
             'label', ascending=False).groupby('id_left')
+        # print("groupd numbers: ", len(groups))
         for idx, group in groups:
+            # print("group_index: ", idx)
             labels = group.label.unique()
             for label in labels[:-1]:
                 pos_samples = group[group.label == label]
